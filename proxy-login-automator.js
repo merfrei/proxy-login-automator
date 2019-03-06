@@ -18,14 +18,14 @@ function main() {
   cfg.ignore_https_cert = cfg.ignore_https_cert === 'true';
   cfg.are_remotes_in_pac_https = cfg.are_remotes_in_pac_https === 'true';
 
-  if (!cfg.local_host || !cfg.local_port || !cfg.remote_host || !cfg.remote_port || !cfg.usr)
+  if (!cfg.local_host || !cfg.local_port || !cfg.remote_host || !cfg.remote_port)
     return console.error('Usage of parameters:\n'
       + '-local_host host\t' + 'Listening address. Default: localhost. (* means all interfaces)\n'
       + '-local_port port\t' + 'Listening port. Default: 8080\n'
       + '-remote_host host\t' + 'Real proxy/PAC server address\n'
       + '-remote_port port\t' + 'Real proxy/PAC server port. Default: 8080\n'
-      + '-usr user\t\t' + 'Real proxy/PAC server user id\n'
-      + '-pwd password\t\t' + 'Real proxy/PAC user password\n'
+      + '-usr user\t\t' + 'Real proxy/PAC server user id (it could be empty)\n'
+      + '-pwd password\t\t' + 'Real proxy/PAC user password (it could be empty)\n'
       + '-as_pac_server true/false\t' + 'Treat `remote_host` as a PAC server. Default: false\n'
       + '\n'
       + '-is_remote_https true/false\t' + 'Talk to `remote_host` with HTTPS. Default: false\n'
@@ -36,7 +36,10 @@ function main() {
     return console.error('when use as a PAC server, the local_host parameter must be a definite address');
   }
   console.log('Using parameters: ' + JSON.stringify(cfg, null, '  '));
-  cfg.buf_proxy_basic_auth = new Buffer('Proxy-Authorization: Basic ' + new Buffer(cfg.usr + ':' + cfg.pwd).toString('base64'));
+  cfg.buf_proxy_basic_auth = null;
+  if (cfg.usr && cfg.pwd) {
+    cfg.buf_proxy_basic_auth = new Buffer('Proxy-Authorization: Basic ' + new Buffer(cfg.usr + ':' + cfg.pwd).toString('base64'));
+  }
 
   if (cfg.as_pac_server) {
     createPacServer(cfg.local_host, cfg.local_port, cfg.remote_host, cfg.remote_port, cfg.buf_proxy_basic_auth, cfg.is_remote_https, cfg.ignore_https_cert, cfg.are_remotes_in_pac_https);
@@ -120,7 +123,9 @@ function createPortForwarder(local_host, local_port, remote_host, remote_port, b
           if (parser.__is_headers_complete) {
             buf_ary.push(buf.slice(unsavedStart, buf[i - 1] === CR ? i - 1 : i));
             //console.log('insert auth header');
-            buf_ary.push(buf_proxy_basic_auth);
+            if (buf_proxy_basic_auth !== null) {
+              buf_ary.push(buf_proxy_basic_auth);
+            }
             buf_ary.push(state === STATE_FOUND_LF_CR ? BUF_CR_LF_CR_LF : BUF_LF_LF);
 
             unsavedStart = i + 1;
@@ -178,7 +183,7 @@ function createPacServer(local_host, local_port, remote_host, remote_port, buf_p
     internal_req.host = remote_host;
     internal_req.port = remote_port;
     req.headers['host'] = remote_host + ':' + remote_port;
-    if (!req.headers['authorization']) {
+    if (!req.headers['authorization'] && buf_proxy_basic_auth !== null) {
       req.headers['authorization'] = buf_proxy_basic_auth.slice('Proxy-Authorization: '.length).toString();
     }
     internal_req.headers = req.headers;
