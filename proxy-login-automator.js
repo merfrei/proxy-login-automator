@@ -28,8 +28,8 @@ function main() {
       + '-pwd password\t\t' + 'Real proxy/PAC user password (it could be empty)\n'
       + '-as_pac_server true/false\t' + 'Treat `remote_host` as a PAC server. Default: false\n'
       + '\n'
-      + '-is_remote_https true/false\t' + 'Talk to `remote_host` with HTTPS. Default: false\n'
-      + '-ignore_https_cert true/false\t' + 'ignore error when verificate HTTPS server certificate. Default: false\n'
+      + '-is_remote_https true/false\t' + 'Talk to real proxy/PAC server with HTTPS. Default: false\n'
+      + '-ignore_https_cert true/false\t' + 'ignore error when verify certificate of real proxy/PAC server. Default: false\n'
       + '-are_remotes_in_pac_https true/false\t' + 'Talk to proxy servers defined in PAC with HTTPS. Default: false\n'
     );
   if (cfg.as_pac_server && (cfg.local_host === '*' || cfg.local_host === '0.0.0.0' || cfg.local_host === '::')) {
@@ -48,7 +48,8 @@ function main() {
   }
 }
 
-var CR = 0xd, LF = 0xa, BUF_CR = new Buffer([0xd]), BUF_CR_LF_CR_LF = new Buffer([0xd, 0xa, 0xd, 0xa]), BUF_LF_LF = new Buffer([0xa, 0xa]);
+var CR = 0xd, LF = 0xa, BUF_CR = new Buffer([0xd]), BUF_CR_LF_CR_LF = new Buffer([0xd, 0xa, 0xd, 0xa]),
+  BUF_LF_LF = new Buffer([0xa, 0xa]), BUF_PROXY_CONNECTION_CLOSE = new Buffer('Proxy-Connection: close');
 var STATE_NONE = 0, STATE_FOUND_LF = 1, STATE_FOUND_LF_CR = 2;
 
 function createPortForwarder(local_host, local_port, remote_host, remote_port, buf_proxy_basic_auth, is_remote_https, ignore_https_cert) {
@@ -79,10 +80,14 @@ function createPortForwarder(local_host, local_port, remote_host, remote_port, b
     });
 
     var parser = new HTTPParser(HTTPParser.REQUEST);
-    parser[HTTPParser.kOnHeadersComplete] = function () {
+    parser[HTTPParser.kOnHeadersComplete] = function (versionMajor, versionMinor, headers, method,
+                                                      url, statusCode, statusMessage, upgrade,
+                                                      shouldKeepAlive) {
       //console.log('---- kOnHeadersComplete----');
       //console.log(arguments);
       parser.__is_headers_complete = true;
+      parser.__upgrade = upgrade;
+      parser.__method = method;
     };
     //parser[HTTPParser.kOnMessageComplete] = function () {
     //    console.log('---- kOnMessageComplete----');
@@ -92,6 +97,10 @@ function createPortForwarder(local_host, local_port, remote_host, remote_port, b
     var state = STATE_NONE;
 
     socket.on('data', function (buf) {
+      if (!parser) {
+        realCon.write(buf);
+        return
+      }
       //console.log('[' + remote_host + ':' + remote_port + ']>>>>' + (Date.t = new Date()) + '.' + Date.t.getMilliseconds() + '\n' + buf.toString('ascii'));
       //var ret = parser.execute(buf);
       //console.log('\n\n----parser result: ' + ret + ' buf len:' + buf.length);
@@ -99,12 +108,6 @@ function createPortForwarder(local_host, local_port, remote_host, remote_port, b
       //return;
 
       var buf_ary = [], unsavedStart = 0, buf_len = buf.length;
-
-      //process orphan CR
-      if (state === STATE_FOUND_LF_CR && buf[0] !== LF) {
-        parser.execute(BUF_CR);
-        buf_ary.push(BUF_CR);
-      }
 
       for (var i = 0; i < buf_len; i++) {
         //find first LF
@@ -128,6 +131,18 @@ function createPortForwarder(local_host, local_port, remote_host, remote_port, b
             }
             buf_ary.push(state === STATE_FOUND_LF_CR ? BUF_CR_LF_CR_LF : BUF_LF_LF);
 
+            // stop intercepting packets if encountered TLS and WebSocket handshake
+            if (parser.__method === 5 /*CONNECT*/ || parser.__upgrade) {
+              parser.close();
+              parser = null;
+
+              buf_ary.push(buf.slice(i + 1));
+              realCon.write(Buffer.concat(buf_ary));
+
+              state = STATE_NONE;
+              return;
+            }
+
             unsavedStart = i + 1;
             state = STATE_NONE;
           }
@@ -143,22 +158,21 @@ function createPortForwarder(local_host, local_port, remote_host, remote_port, b
       }
 
       if (unsavedStart < buf_len) {
-        //strip last CR if found LF_CR
-        buf = buf.slice(unsavedStart, state === STATE_FOUND_LF_CR ? buf_len - 1 : buf_len);
-        if (buf.length) {
-          parser.execute(buf);
-          buf_ary.push(buf);
-        }
+        buf = buf.slice(unsavedStart, buf_len);
+        parser.execute(buf);
+        buf_ary.push(buf);
       }
 
-      buf = Buffer.concat(buf_ary);
-      realCon.write(buf);
+      realCon.write(Buffer.concat(buf_ary));
 
     }).on('end', cleanup).on('close', cleanup).on('error', function (err) {
-      console.error('[LocalProxy(:' + local_port + ')][Incoming connection] ' + err);
+      if (!socket.__cleanup) {
+        console.error('[LocalProxy(:' + local_port + ')][Incoming connection] ' + err);
+      }
     });
 
     function cleanup() {
+      socket.__cleanup = true;
       if (parser) {
         parser.close();
         parser = null;
