@@ -37,7 +37,7 @@ function main() {
   }
   console.log('Using parameters: ' + JSON.stringify(cfg, null, '  '));
   cfg.buf_proxy_basic_auth = null;
-  if (cfg.usr && cfg.pwd) {
+  if (cfg.usr) {
     cfg.buf_proxy_basic_auth = new Buffer('Proxy-Authorization: Basic ' + new Buffer(cfg.usr + ':' + cfg.pwd).toString('base64'));
   }
 
